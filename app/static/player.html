@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Kushi ASR Player</title>
+    <link rel="stylesheet" href="/static/player.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <p class="eyebrow">Kushi ASR</p>
+      <h1>Hold to talk</h1>
+      <p class="subhead">Press and hold the button, speak, then release.</p>
+
+      <button id="talkButton" class="talk-button" type="button">
+        Hold to talk
+      </button>
+
+      <p id="status" class="status idle">Idle</p>
+
+      <section class="panel">
+        <pre id="finalTranscript" class="transcript muted">Transcript will appear here.</pre>
+      </section>
+    </main>
+
+    <script type="module" src="/static/player.js"></script>
+  </body>
+</html>
