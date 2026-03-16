@@ -1,0 +1,19 @@
+services:
+  kushi-asr:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: kushi-asr:latest
+    container_name: kushi-asr
+    env_file:
+      - .env
+    environment:
+      APP_PORT: ${APP_PORT:-8000}
+      GOOGLE_APPLICATION_CREDENTIALS: /app/credentials/Cospin TTS Config.json
+    ports:
+      - "${APP_PORT:-8000}:${APP_PORT:-8000}"
+    volumes:
+      - type: bind
+        source: ./Cospin TTS Config.json
+        target: /app/credentials/Cospin TTS Config.json
+        read_only: true
