@@ -26,7 +26,9 @@ def _swallow_future_exception(future: asyncio.Future[Any]) -> None:
 class TranscriptSession:
     session_id: str
     language_code: str
+    sample_rate_hz: int
     expires_at: datetime
+    callback_url: Optional[str] = None
     audio_queue: Queue = field(default_factory=Queue)
     created_at: datetime = field(default_factory=utc_now)
     websocket: Optional[WebSocket] = None
@@ -88,13 +90,20 @@ class SessionManager:
         self._sessions: Dict[str, TranscriptSession] = {}
         self._lock = threading.Lock()
 
-    def create_session(self, language_code: str) -> TranscriptSession:
+    def create_session(
+        self,
+        language_code: str,
+        sample_rate_hz: int,
+        callback_url: Optional[str] = None,
+    ) -> TranscriptSession:
         self.cleanup_expired()
 
         session = TranscriptSession(
             session_id=uuid4().hex,
             language_code=language_code,
+            sample_rate_hz=sample_rate_hz,
             expires_at=utc_now() + timedelta(seconds=self.ttl_seconds),
+            callback_url=callback_url,
         )
 
         with self._lock:

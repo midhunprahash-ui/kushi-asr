@@ -1,5 +1,6 @@
 const API_PREFIX = "/api/asr/v1";
 const TRANSCRIPTS_ENDPOINT = `${API_PREFIX}/transcripts`;
+const STREAM_ENDPOINT = `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host}${API_PREFIX}/stream`;
 const callbackUrlParam = new URLSearchParams(window.location.search).get("callback_url") || "";
 const CALLBACK_URL_STORAGE_KEY = "kushi-asr.callback-url";
 
@@ -7,6 +8,8 @@ const callbackUrlInput = document.getElementById("callbackUrlInput");
 const talkButton = document.getElementById("talkButton");
 const statusNode = document.getElementById("status");
 const finalNode = document.getElementById("finalTranscript");
+const chunksSentNode = document.getElementById("chunksSentValue");
+const chunksReceivedNode = document.getElementById("chunksReceivedValue");
 const latencyNode = document.getElementById("latencyValue");
 const processingNode = document.getElementById("processingValue");
 const recordingNode = document.getElementById("recordingValue");
@@ -22,12 +25,30 @@ let mediaStream;
 let recorder;
 let chunks = [];
 let state = "idle";
+let recordingMode = null;
 let stopRequestedDuringStart = false;
 let recordingStartedAt = null;
+let recordingDurationMs = Number.NaN;
 
-function setStatus(message, state = "idle") {
+let audioContext;
+let sourceNode;
+let workletNode;
+let silenceNode;
+let streamingSocket;
+let streamedBytes = 0;
+let streamedChunkCount = 0;
+let receivedChunkCount = 0;
+let finalizationStartedAt = null;
+let finalTranscriptSegments = [];
+let interimTranscript = "";
+let streamingCompletionResolve;
+let streamingCompletionReject;
+let streamingCompletionTimer;
+let streamingCompleted = false;
+
+function setStatus(message, nextState = "idle") {
   statusNode.textContent = message;
-  statusNode.className = `status ${state}`;
+  statusNode.className = `status ${nextState}`;
 }
 
 function setMetric(node, value) {
@@ -40,6 +61,8 @@ function resetTranscript() {
 }
 
 function resetMetrics() {
+  setMetric(chunksSentNode, "-");
+  setMetric(chunksReceivedNode, "-");
   setMetric(latencyNode, "-");
   setMetric(processingNode, "-");
   setMetric(recordingNode, "-");
@@ -160,6 +183,15 @@ function setButtonState() {
   talkButton.textContent = state === "recording" ? "Release to send" : "Hold to talk";
 }
 
+function supportsStreamingCapture() {
+  return Boolean(
+    navigator.mediaDevices?.getUserMedia &&
+      window.WebSocket &&
+      (window.AudioContext || window.webkitAudioContext) &&
+      window.AudioWorkletNode,
+  );
+}
+
 async function stopTracks() {
   if (mediaStream) {
     mediaStream.getTracks().forEach((track) => track.stop());
@@ -167,37 +199,351 @@ async function stopTracks() {
   }
 }
 
-async function beginRecording() {
-  if (state !== "idle") {
+function renderStreamingTranscript() {
+  const text = [...finalTranscriptSegments, interimTranscript].filter(Boolean).join(" ").trim();
+  finalNode.textContent = text || "Listening...";
+  finalNode.classList.remove("muted");
+}
+
+function convertFloat32ToPcm16(float32Array) {
+  const buffer = new ArrayBuffer(float32Array.length * 2);
+  const view = new DataView(buffer);
+
+  for (let index = 0; index < float32Array.length; index += 1) {
+    const sample = Math.max(-1, Math.min(1, float32Array[index]));
+    const int16 = sample < 0 ? sample * 0x8000 : sample * 0x7fff;
+    view.setInt16(index * 2, int16, true);
+  }
+
+  return buffer;
+}
+
+function cleanupStreamingPromise() {
+  if (streamingCompletionTimer) {
+    window.clearTimeout(streamingCompletionTimer);
+    streamingCompletionTimer = null;
+  }
+
+  streamingCompletionResolve = undefined;
+  streamingCompletionReject = undefined;
+}
+
+function rejectStreamingCompletion(error) {
+  if (streamingCompletionReject) {
+    const reject = streamingCompletionReject;
+    cleanupStreamingPromise();
+    reject(error);
+  }
+}
+
+function resolveStreamingCompletion(payload) {
+  if (streamingCompletionResolve) {
+    const resolve = streamingCompletionResolve;
+    cleanupStreamingPromise();
+    resolve(payload);
+  }
+}
+
+function closeStreamingSocket() {
+  if (!streamingSocket) {
     return;
   }
 
-  state = "starting";
-  stopRequestedDuringStart = false;
+  streamingSocket.onmessage = null;
+  streamingSocket.onerror = null;
+  streamingSocket.onclose = null;
+
+  if (
+    streamingSocket.readyState === WebSocket.OPEN ||
+    streamingSocket.readyState === WebSocket.CONNECTING
+  ) {
+    streamingSocket.close();
+  }
+
+  streamingSocket = null;
+}
+
+async function cleanupStreamingAudio() {
+  if (workletNode) {
+    workletNode.port.onmessage = null;
+    try {
+      workletNode.disconnect();
+    } catch (error) {
+      // Ignore teardown errors.
+    }
+    workletNode = null;
+  }
+
+  if (sourceNode) {
+    try {
+      sourceNode.disconnect();
+    } catch (error) {
+      // Ignore teardown errors.
+    }
+    sourceNode = null;
+  }
+
+  if (silenceNode) {
+    try {
+      silenceNode.disconnect();
+    } catch (error) {
+      // Ignore teardown errors.
+    }
+    silenceNode = null;
+  }
+
+  if (audioContext) {
+    const activeContext = audioContext;
+    audioContext = null;
+    await activeContext.close().catch(() => {});
+  }
+
+  await stopTracks();
+}
+
+async function resetStreamingState() {
+  await cleanupStreamingAudio();
+  closeStreamingSocket();
+  cleanupStreamingPromise();
+  streamedBytes = 0;
+  streamedChunkCount = 0;
+  receivedChunkCount = 0;
+  finalizationStartedAt = null;
+  finalTranscriptSegments = [];
+  interimTranscript = "";
+  streamingCompleted = false;
+}
+
+function applyCompletedPayload(payload) {
+  finalNode.textContent = payload.text || "";
+  finalNode.classList.toggle("muted", !payload.text);
+  setMetric(chunksSentNode, String(streamedChunkCount));
+  setMetric(chunksReceivedNode, String(receivedChunkCount));
+  setMetric(latencyNode, formatMilliseconds(performance.now() - finalizationStartedAt));
+  setMetric(processingNode, formatMilliseconds(payload.processing_ms));
+  setMetric(recordingNode, formatMilliseconds(recordingDurationMs));
+  setMetric(speechNode, formatSeconds(payload.speech_seconds));
+  setMetric(audioSizeNode, formatBytes(streamedBytes));
+  setMetric(recognizerNode, formatRecognizer(payload.language_code, payload.model));
+  setMetric(transcriptIdNode, payload.id || "-");
+  setMetric(resultUrlNode, buildResultUrl(payload.id));
+  setMetric(deliveryStatusNode, formatDeliveryStatus(payload.delivery_status));
+  setMetric(deliveryTargetNode, payload.delivery_target || "-");
+}
+
+function handleStreamingMessage(event) {
+  if (typeof event.data !== "string") {
+    return;
+  }
+
+  let payload;
+  try {
+    payload = JSON.parse(event.data);
+  } catch (error) {
+    return;
+  }
+
+  switch (payload.type) {
+    case "session":
+      receivedChunkCount = 0;
+      setMetric(chunksReceivedNode, "0");
+      return;
+    case "chunk":
+      if (Number.isFinite(payload.received_chunks)) {
+        receivedChunkCount = payload.received_chunks;
+        setMetric(chunksReceivedNode, String(receivedChunkCount));
+      }
+      return;
+    case "partial":
+      interimTranscript = payload.text || "";
+      renderStreamingTranscript();
+      return;
+    case "final":
+      if (payload.text) {
+        finalTranscriptSegments.push(payload.text);
+      }
+      interimTranscript = "";
+      renderStreamingTranscript();
+      return;
+    case "completed":
+      streamingCompleted = true;
+      applyCompletedPayload(payload);
+      setStatus(payload.text ? "Transcript ready" : "No speech detected", "idle");
+      state = "idle";
+      recordingMode = null;
+      setButtonState();
+      resolveStreamingCompletion(payload);
+      return;
+    case "error": {
+      const message = payload.message || "Streaming transcription failed.";
+      finalNode.textContent = message;
+      finalNode.classList.remove("muted");
+      setStatus(message, "error");
+      state = "idle";
+      recordingMode = null;
+      setButtonState();
+      rejectStreamingCompletion(new Error(message));
+      return;
+    }
+    default:
+      return;
+  }
+}
+
+function handleStreamingClose() {
+  if (!streamingCompleted) {
+    rejectStreamingCompletion(new Error("Streaming connection closed unexpectedly."));
+  }
+
+  closeStreamingSocket();
+}
+
+function createStreamingCompletionPromise() {
+  return new Promise((resolve, reject) => {
+    streamingCompletionResolve = resolve;
+    streamingCompletionReject = reject;
+    streamingCompletionTimer = window.setTimeout(() => {
+      rejectStreamingCompletion(new Error("Timed out waiting for the final transcript."));
+    }, 15000);
+  });
+}
+
+async function beginStreamingRecording() {
+  const callbackUrl = getCallbackUrl();
+  const AudioContextConstructor = window.AudioContext || window.webkitAudioContext;
+
+  mediaStream = await navigator.mediaDevices.getUserMedia({
+    audio: {
+      channelCount: 1,
+      echoCancellation: true,
+      noiseSuppression: true,
+      autoGainControl: true,
+    },
+  });
+
+  audioContext = new AudioContextConstructor({ latencyHint: "interactive" });
+  await audioContext.audioWorklet.addModule("/static/player-worklet.js");
+  if (audioContext.state === "suspended") {
+    await audioContext.resume();
+  }
+
+  finalTranscriptSegments = [];
+  interimTranscript = "";
+  streamedBytes = 0;
+  streamedChunkCount = 0;
+  receivedChunkCount = 0;
+  finalizationStartedAt = null;
+  streamingCompleted = false;
+  setMetric(chunksSentNode, "0");
+  setMetric(chunksReceivedNode, "0");
+
+  const socket = await new Promise((resolve, reject) => {
+    const nextSocket = new WebSocket(STREAM_ENDPOINT);
+    nextSocket.binaryType = "arraybuffer";
+
+    nextSocket.addEventListener("open", () => resolve(nextSocket), { once: true });
+    nextSocket.addEventListener(
+      "error",
+      () => reject(new Error("Unable to open the streaming connection.")),
+      { once: true },
+    );
+  });
+
+  streamingSocket = socket;
+  streamingSocket.onmessage = handleStreamingMessage;
+  streamingSocket.onerror = () => {
+    if (state !== "idle") {
+      rejectStreamingCompletion(new Error("Streaming connection failed."));
+    }
+  };
+  streamingSocket.onclose = handleStreamingClose;
+
+  streamingSocket.send(
+    JSON.stringify({
+      type: "start",
+      language_code: "en-US",
+      callback_url: callbackUrl || null,
+      sample_rate_hz: Math.round(audioContext.sampleRate),
+    }),
+  );
+
+  sourceNode = audioContext.createMediaStreamSource(mediaStream);
+  workletNode = new AudioWorkletNode(audioContext, "pcm-capture-processor");
+  silenceNode = audioContext.createGain();
+  silenceNode.gain.value = 0;
+
+  workletNode.port.onmessage = ({ data }) => {
+    if (!(data instanceof Float32Array)) {
+      return;
+    }
+
+    if (!streamingSocket || streamingSocket.readyState !== WebSocket.OPEN) {
+      return;
+    }
+
+    const pcmBuffer = convertFloat32ToPcm16(data);
+    streamedBytes += pcmBuffer.byteLength;
+    streamedChunkCount += 1;
+    setMetric(chunksSentNode, String(streamedChunkCount));
+    streamingSocket.send(pcmBuffer);
+  };
+
+  sourceNode.connect(workletNode);
+  workletNode.connect(silenceNode);
+  silenceNode.connect(audioContext.destination);
+
+  recordingMode = "streaming";
+  recordingDurationMs = Number.NaN;
+  state = "recording";
+  recordingStartedAt = performance.now();
   setButtonState();
-  setStatus("Waiting for microphone…", "idle");
-  resetMetrics();
-  resetResultDetails();
-  finalNode.textContent = "Listening...";
-  finalNode.classList.remove("muted");
+  setStatus("Streaming…", "live");
+}
+
+async function finishStreamingRecording() {
+  if (!streamingSocket || streamingSocket.readyState !== WebSocket.OPEN) {
+    throw new Error("Streaming connection is not open.");
+  }
+
+  recordingDurationMs =
+    recordingStartedAt === null ? Number.NaN : performance.now() - recordingStartedAt;
+  setMetric(recordingNode, formatMilliseconds(recordingDurationMs));
+  setMetric(audioSizeNode, formatBytes(streamedBytes));
+  finalizationStartedAt = performance.now();
+
+  const completionPromise = createStreamingCompletionPromise();
+  state = "uploading";
+  setButtonState();
+  setStatus("Finalizing transcript…", "idle");
+
+  if (workletNode) {
+    workletNode.port.postMessage({ type: "flush" });
+  }
+
+  await new Promise((resolve) => {
+    window.setTimeout(resolve, 50);
+  });
+
+  await cleanupStreamingAudio();
+  streamingSocket.send(JSON.stringify({ type: "stop" }));
 
   try {
-    mediaStream = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        channelCount: 1,
-        echoCancellation: true,
-        noiseSuppression: true,
-        autoGainControl: true,
-      },
-    });
-  } catch (error) {
-    state = "idle";
-    setButtonState();
-    setStatus(error.message || "Unable to access the microphone.", "error");
-    finalNode.textContent = error.message || "Unable to access the microphone.";
-    finalNode.classList.remove("muted");
-    return;
+    await completionPromise;
+  } finally {
+    recordingStartedAt = null;
+    await resetStreamingState();
   }
+}
+
+async function beginUploadRecording() {
+  mediaStream = await navigator.mediaDevices.getUserMedia({
+    audio: {
+      channelCount: 1,
+      echoCancellation: true,
+      noiseSuppression: true,
+      autoGainControl: true,
+    },
+  });
 
   chunks = [];
   recorder = new MediaRecorder(mediaStream, {
@@ -211,17 +557,15 @@ async function beginRecording() {
   });
 
   recorder.start();
+  recordingMode = "upload";
+  recordingDurationMs = Number.NaN;
   state = "recording";
   recordingStartedAt = performance.now();
   setButtonState();
   setStatus("Recording…", "live");
-
-  if (stopRequestedDuringStart) {
-    await finishRecording();
-  }
 }
 
-async function submitRecording(blob, recordingDurationMs) {
+async function submitRecording(blob) {
   setMetric(recordingNode, formatMilliseconds(recordingDurationMs));
   setMetric(audioSizeNode, formatBytes(blob.size));
 
@@ -264,13 +608,8 @@ async function submitRecording(blob, recordingDurationMs) {
   setStatus(payload.text ? "Transcript ready" : "No speech detected", "idle");
 }
 
-async function finishRecording() {
-  if (state === "starting") {
-    stopRequestedDuringStart = true;
-    return;
-  }
-
-  if (state !== "recording" || !recorder) {
+async function finishUploadRecording() {
+  if (!recorder) {
     return;
   }
 
@@ -279,9 +618,8 @@ async function finishRecording() {
   state = "uploading";
   setButtonState();
   setStatus("Uploading audio…", "idle");
-  const recordingDurationMs =
+  recordingDurationMs =
     recordingStartedAt === null ? Number.NaN : performance.now() - recordingStartedAt;
-  recordingStartedAt = null;
 
   const blob = await new Promise((resolve) => {
     activeRecorder.addEventListener(
@@ -298,15 +636,85 @@ async function finishRecording() {
   await stopTracks();
 
   try {
-    await submitRecording(blob, recordingDurationMs);
+    await submitRecording(blob);
+  } finally {
+    chunks = [];
+    recordingStartedAt = null;
+    recordingMode = null;
+    state = "idle";
+    setButtonState();
+  }
+}
+
+async function beginRecording() {
+  if (state !== "idle") {
+    return;
+  }
+
+  state = "starting";
+  stopRequestedDuringStart = false;
+  setButtonState();
+  setStatus("Waiting for microphone…", "idle");
+  resetMetrics();
+  resetResultDetails();
+  resetTranscript();
+  finalNode.textContent = "Listening...";
+  finalNode.classList.remove("muted");
+
+  try {
+    if (supportsStreamingCapture()) {
+      await beginStreamingRecording();
+    } else {
+      await beginUploadRecording();
+    }
+  } catch (error) {
+    await resetStreamingState();
+
+    try {
+      await beginUploadRecording();
+    } catch (fallbackError) {
+      state = "idle";
+      recordingMode = null;
+      setButtonState();
+      setStatus(fallbackError.message || "Unable to access the microphone.", "error");
+      finalNode.textContent = fallbackError.message || "Unable to access the microphone.";
+      finalNode.classList.remove("muted");
+      return;
+    }
+  }
+
+  if (stopRequestedDuringStart) {
+    await finishRecording();
+  }
+}
+
+async function finishRecording() {
+  if (state === "starting") {
+    stopRequestedDuringStart = true;
+    return;
+  }
+
+  if (state !== "recording") {
+    return;
+  }
+
+  try {
+    if (recordingMode === "streaming") {
+      await finishStreamingRecording();
+      return;
+    }
+
+    await finishUploadRecording();
   } catch (error) {
     finalNode.textContent = error.message || "Unable to transcribe audio.";
     finalNode.classList.remove("muted");
     setStatus(error.message || "Unable to transcribe audio.", "error");
-  } finally {
-    chunks = [];
     state = "idle";
+    recordingMode = null;
+    recordingStartedAt = null;
     setButtonState();
+    await resetStreamingState();
+    await stopTracks();
   }
 }
 

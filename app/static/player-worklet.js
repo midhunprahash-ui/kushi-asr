@@ -4,6 +4,28 @@ class PcmCaptureProcessor extends AudioWorkletProcessor {
     this.pending = [];
     this.pendingFrames = 0;
     this.flushSize = 4096;
+    this.port.onmessage = (event) => {
+      if (event.data?.type === "flush") {
+        this.flush();
+      }
+    };
+  }
+
+  flush() {
+    if (this.pendingFrames === 0) {
+      return;
+    }
+
+    const combined = new Float32Array(this.pendingFrames);
+    let offset = 0;
+    for (const chunk of this.pending) {
+      combined.set(chunk, offset);
+      offset += chunk.length;
+    }
+
+    this.port.postMessage(combined, [combined.buffer]);
+    this.pending = [];
+    this.pendingFrames = 0;
   }
 
   process(inputs) {
@@ -17,16 +39,7 @@ class PcmCaptureProcessor extends AudioWorkletProcessor {
     this.pendingFrames += copy.length;
 
     if (this.pendingFrames >= this.flushSize) {
-      const combined = new Float32Array(this.pendingFrames);
-      let offset = 0;
-      for (const chunk of this.pending) {
-        combined.set(chunk, offset);
-        offset += chunk.length;
-      }
-
-      this.port.postMessage(combined, [combined.buffer]);
-      this.pending = [];
-      this.pendingFrames = 0;
+      this.flush();
     }
 
     return true;

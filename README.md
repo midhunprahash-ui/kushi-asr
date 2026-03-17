@@ -8,9 +8,10 @@ Simple push-to-talk ASR microservice using Google Speech-to-Text v2 Chirp 3, Fas
 - `GET /api/asr/v1/player`
 - `POST /api/asr/v1/transcripts`
 - `GET /api/asr/v1/transcripts/{transcript_id}`
+- `WS /api/asr/v1/stream`
 - `POST /api/asr/v1/transcript` (legacy alias)
 
-`POST /api/asr/v1/transcripts` accepts one uploaded audio file, stores the result, returns transcript metadata for the built-in player UI, and can optionally POST `{"text":"..."}` to another service.
+`POST /api/asr/v1/transcripts` accepts one uploaded audio file, stores the result, returns transcript metadata for the built-in player UI, and can optionally POST `{"text":"..."}` to another service. The browser player prefers `WS /api/asr/v1/stream` for lower-latency hold-to-talk streaming and falls back to the upload endpoint if streaming capture is unavailable.
 
 If a callback URL is provided, the service forwards the transcript as:
 
@@ -157,8 +158,8 @@ docker compose down
 ## Notes
 
 - Chirp 3 is configured with `ASR_MODEL=chirp_3`.
-- The browser player records a short clip and uploads it in one request.
-- The backend uses synchronous recognition with format auto-detection, which is suited to short push-to-talk audio.
+- The browser player streams PCM audio to FastAPI over WebSocket while you hold the button, then falls back to upload-on-release when streaming capture is unavailable.
+- FastAPI uses Google Speech-to-Text v2 over the Python gRPC transport. Live hold-to-talk uses bidirectional `StreamingRecognize`; the upload fallback uses unary `Recognize`.
 - Keep clips short; synchronous recognition is intended for brief local files rather than long recordings.
 - To auto-forward UI transcripts, either set `ASR_OUTPUT_POST_URL` in `.env` or fill the callback URL field in the player UI.
 - If `ASR_OUTPUT_BEARER_TOKEN` is set, outbound callback requests include `Authorization: Bearer <token>`.

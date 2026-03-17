@@ -25,6 +25,9 @@ class Settings(BaseSettings):
     asr_language_code: str = Field(default="en-US", alias="ASR_LANGUAGE_CODE")
     asr_model: str = Field(default="chirp_3", alias="ASR_MODEL")
     asr_max_upload_bytes: int = Field(default=10_485_760, alias="ASR_MAX_UPLOAD_BYTES")
+    asr_session_ttl_seconds: int = Field(default=180, alias="ASR_SESSION_TTL_SECONDS")
+    asr_target_sample_rate_hz: int = Field(default=16_000, alias="ASR_TARGET_SAMPLE_RATE_HZ")
+    asr_enable_interim_results: bool = Field(default=True, alias="ASR_ENABLE_INTERIM_RESULTS")
     asr_output_post_url: Optional[str] = Field(default=None, alias="ASR_OUTPUT_POST_URL")
     asr_output_bearer_token: Optional[str] = Field(
         default=None,

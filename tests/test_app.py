@@ -50,6 +50,45 @@ def install_fake_transcribe(app, *, text="hello world", speech_seconds=1.5):
     app.state.speech_recognizer.transcribe = fake_transcribe
 
 
+def install_fake_streaming_transcribe(app, *, text="hello world", speech_seconds=1.5):
+    streamed = {"chunks": []}
+
+    def fake_transcribe_streaming(
+        audio_chunks,
+        *,
+        language_code,
+        source_sample_rate_hz,
+        on_partial,
+        on_final,
+    ):
+        assert language_code == "en-US"
+        assert source_sample_rate_hz == 48_000
+
+        for index, chunk in enumerate(audio_chunks):
+            streamed["chunks"].append(chunk)
+            if index == 0:
+                on_partial("hello")
+
+        on_final(text)
+        return {
+            "text": text,
+            "language_code": language_code,
+            "model": "chirp_3",
+            "speech_seconds": speech_seconds,
+            "segments": [
+                {
+                    "text": text,
+                    "confidence": 0.99,
+                    "language_code": language_code,
+                    "end_offset_seconds": speech_seconds,
+                }
+            ],
+        }
+
+    app.state.speech_recognizer.transcribe_streaming = fake_transcribe_streaming
+    return streamed
+
+
 def test_health_reports_ready_state(monkeypatch, tmp_path):
     client = build_client(monkeypatch, tmp_path)
 
@@ -232,6 +271,78 @@ def test_create_transcript_rejects_empty_upload(monkeypatch, tmp_path):
 
     assert response.status_code == 400
     assert response.json()["detail"]["message"] == "Audio file is required."
+
+
+def test_stream_transcript_returns_completed_and_persists_result(monkeypatch, tmp_path):
+    client = build_client(monkeypatch, tmp_path)
+    app = client.app
+    streamed = install_fake_streaming_transcribe(app, text="hello world", speech_seconds=1.5)
+
+    with client.websocket_connect("/api/asr/v1/stream") as websocket:
+        websocket.send_json(
+            {
+                "type": "start",
+                "sample_rate_hz": 48_000,
+            }
+        )
+        session_payload = websocket.receive_json()
+        assert session_payload["type"] == "session"
+        assert session_payload["session_id"]
+
+        websocket.send_bytes(b"chunk-one")
+        first_messages = [websocket.receive_json(), websocket.receive_json()]
+        assert first_messages == [
+            {"type": "chunk", "received_chunks": 1},
+            {"type": "partial", "text": "hello"},
+        ]
+
+        websocket.send_bytes(b"chunk-two")
+        websocket.send_json({"type": "stop"})
+
+        tail_messages = [
+            websocket.receive_json(),
+            websocket.receive_json(),
+            websocket.receive_json(),
+        ]
+        assert tail_messages[0] == {"type": "chunk", "received_chunks": 2}
+        assert tail_messages[1] == {"type": "final", "text": "hello world"}
+        completed_payload = tail_messages[2]
+        assert completed_payload["type"] == "completed"
+        assert completed_payload["id"]
+        assert completed_payload["text"] == "hello world"
+        assert completed_payload["language_code"] == "en-US"
+        assert completed_payload["model"] == "chirp_3"
+        assert completed_payload["speech_seconds"] == 1.5
+        assert isinstance(completed_payload["processing_ms"], int)
+        assert completed_payload["delivery_status"] == "skipped"
+        assert completed_payload["delivery_target"] is None
+
+    assert streamed["chunks"] == [b"chunk-one", b"chunk-two"]
+
+    fetched = client.get(f"/api/asr/v1/transcripts/{completed_payload['id']}")
+
+    assert fetched.status_code == 200
+    assert fetched.json() == {"text": "hello world"}
+
+
+def test_stream_transcript_rejects_invalid_callback_url(monkeypatch, tmp_path):
+    client = build_client(monkeypatch, tmp_path)
+
+    with client.websocket_connect("/api/asr/v1/stream") as websocket:
+        websocket.send_json(
+            {
+                "type": "start",
+                "sample_rate_hz": 48_000,
+                "callback_url": "not-a-url",
+            }
+        )
+
+        error_payload = websocket.receive_json()
+
+    assert error_payload == {
+        "type": "error",
+        "message": "callback_url must be a valid http or https URL.",
+    }
 
 
 def test_duration_to_seconds_accepts_timedelta():
