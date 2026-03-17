@@ -29,3 +29,7 @@ class TranscriptResponse(BaseModel):
 
 class TranscriptTextResponse(BaseModel):
     text: str
+
+
+class MessageResponse(BaseModel):
+    message: str

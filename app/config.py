@@ -13,6 +13,7 @@ class Settings(BaseSettings):
     app_host: str = Field(default="0.0.0.0", alias="APP_HOST")
     app_port: int = Field(default=8000, alias="APP_PORT")
     api_prefix: str = "/api/asr/v1"
+    api_v2_prefix: str = "/api/asr/v2"
 
     google_cloud_project: Optional[str] = Field(default=None, alias="GOOGLE_CLOUD_PROJECT")
     google_application_credentials: Optional[str] = Field(
@@ -38,6 +39,10 @@ class Settings(BaseSettings):
         alias="ASR_OUTPUT_POST_TIMEOUT_SECONDS",
     )
     asr_result_ttl_seconds: int = Field(default=900, alias="ASR_RESULT_TTL_SECONDS")
+
+    gemini_location: str = Field(default="us-central1", alias="GEMINI_LOCATION")
+    gemini_model: str = Field(default="gemini-2.5-flash", alias="GEMINI_MODEL")
+    gemini_system_prompt: str = Field(default="", alias="GEMINI_SYSTEM_PROMPT")
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
@@ -65,6 +70,17 @@ class Settings(BaseSettings):
             missing.append("GOOGLE_APPLICATION_CREDENTIALS")
         elif not Path(credentials_path).exists():
             missing.append(f"GOOGLE_APPLICATION_CREDENTIALS:{credentials_path}")
+
+        return missing
+
+    def missing_gemini_env(self) -> List[str]:
+        missing = self.missing_google_env()
+
+        if not self.gemini_location:
+            missing.append("GEMINI_LOCATION")
+
+        if not self.gemini_model:
+            missing.append("GEMINI_MODEL")
 
         return missing
 

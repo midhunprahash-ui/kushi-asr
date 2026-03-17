@@ -3,8 +3,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: kushi-asr:latest
-    container_name: kushi-asr
+    image: kushi-asr:v2
+    container_name: kushi-asr-v2
     init: true
     restart: unless-stopped
     env_file:

@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Kushi Message Player</title>
+    <link rel="stylesheet" href="/static/player.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <section class="hero">
+        <div>
+          <h1>Push to message</h1>
+          <p class="subhead">Hold the button, record from the mic, then release for a Gemini JSON response.</p>
+        </div>
+        <div class="hero-status">
+          <span class="hero-label">Status</span>
+          <p id="status" class="status idle">Idle</p>
+        </div>
+      </section>
+
+      <section class="workspace">
+        <section class="panel control-panel">
+          <div>
+            <h2>Control</h2>
+            <p class="field-help">The server reads <code>GEMINI_SYSTEM_PROMPT</code> from <code>.env</code>. This page only captures audio and shows the final JSON output.</p>
+          </div>
+
+          <button id="talkButton" class="talk-button" type="button">
+            Hold to talk
+          </button>
+        </section>
+
+        <section class="panel metrics-panel">
+          <h2>Request Metrics</h2>
+          <dl class="metrics">
+            <div class="metric-row">
+              <dt>Final latency</dt>
+              <dd id="latencyValue">-</dd>
+            </div>
+            <div class="metric-row">
+              <dt>Recording</dt>
+              <dd id="recordingValue">-</dd>
+            </div>
+            <div class="metric-row">
+              <dt>Audio size</dt>
+              <dd id="audioSizeValue">-</dd>
+            </div>
+            <div class="metric-row">
+              <dt>MIME type</dt>
+              <dd id="mimeTypeValue">-</dd>
+            </div>
+          </dl>
+        </section>
+
+        <section class="panel result-panel">
+          <h2>Response Details</h2>
+          <dl class="metrics">
+            <div class="metric-row">
+              <dt>Endpoint</dt>
+              <dd id="endpointValue" class="metric-wrap">-</dd>
+            </div>
+            <div class="metric-row">
+              <dt>Prompt source</dt>
+              <dd id="promptSourceValue">-</dd>
+            </div>
+            <div class="metric-row">
+              <dt>Response shape</dt>
+              <dd id="responseShapeValue" class="metric-wrap">-</dd>
+            </div>
+          </dl>
+        </section>
+
+        <section class="panel transcript-panel">
+          <h2>Output JSON</h2>
+          <pre id="messageOutput" class="transcript muted">{
+  "message": "Awaiting input..."
+}</pre>
+        </section>
+      </section>
+    </main>
+
+    <script type="module" src="/static/player-v2.js"></script>
+  </body>
+</html>

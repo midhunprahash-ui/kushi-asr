@@ -21,6 +21,9 @@ def build_client(monkeypatch, tmp_path: Path) -> TestClient:
     monkeypatch.setenv("GCP_SPEECH_LOCATION", "us")
     monkeypatch.setenv("ASR_LANGUAGE_CODE", "en-IN")
     monkeypatch.setenv("ASR_RESULT_TTL_SECONDS", "900")
+    monkeypatch.setenv("GEMINI_LOCATION", "us-central1")
+    monkeypatch.setenv("GEMINI_MODEL", "gemini-2.5-flash")
+    monkeypatch.setenv("GEMINI_SYSTEM_PROMPT", "")
     get_settings.cache_clear()
 
     return TestClient(create_app())
@@ -90,6 +93,15 @@ def install_fake_streaming_transcribe(app, *, text="hello world", speech_seconds
     return streamed
 
 
+def install_fake_generate_message(app, *, message="cleaned user request"):
+    def fake_generate_message(audio_content, mime_type):
+        assert audio_content == b"fake-audio"
+        assert mime_type == "audio/webm"
+        return {"message": message}
+
+    app.state.gemini_message_generator.generate_message = fake_generate_message
+
+
 def test_health_reports_ready_state(monkeypatch, tmp_path):
     client = build_client(monkeypatch, tmp_path)
 
@@ -114,6 +126,17 @@ def test_player_page_is_served(monkeypatch, tmp_path):
     assert response.headers["cache-control"] == "no-store, no-cache, must-revalidate"
 
 
+def test_v2_player_page_is_served(monkeypatch, tmp_path):
+    client = build_client(monkeypatch, tmp_path)
+
+    response = client.get("/api/asr/v2/player")
+
+    assert response.status_code == 200
+    assert "Push to message" in response.text
+    assert "GEMINI_SYSTEM_PROMPT" in response.text
+    assert response.headers["cache-control"] == "no-store, no-cache, must-revalidate"
+
+
 def test_player_assets_are_served_without_cache(monkeypatch, tmp_path):
     client = build_client(monkeypatch, tmp_path)
 
@@ -121,6 +144,68 @@ def test_player_assets_are_served_without_cache(monkeypatch, tmp_path):
 
     assert response.status_code == 200
     assert response.headers["cache-control"] == "no-store, no-cache, must-revalidate"
+
+
+def test_v2_player_assets_are_served_without_cache(monkeypatch, tmp_path):
+    client = build_client(monkeypatch, tmp_path)
+
+    response = client.get("/static/player-v2.js")
+
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store, no-cache, must-revalidate"
+
+
+def test_create_message_returns_json_message(monkeypatch, tmp_path):
+    client = build_client(monkeypatch, tmp_path)
+    app = client.app
+
+    install_fake_generate_message(app, message="rewrite this into a crisp request")
+
+    response = client.post(
+        "/api/asr/v2/messages",
+        files={"audio": ("sample.webm", b"fake-audio", "audio/webm")},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"message": "rewrite this into a crisp request"}
+
+
+def test_create_message_rejects_empty_upload(monkeypatch, tmp_path):
+    client = build_client(monkeypatch, tmp_path)
+
+    response = client.post(
+        "/api/asr/v2/messages",
+        files={"audio": ("sample.webm", b"", "audio/webm")},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"]["message"] == "Audio file is required."
+
+
+def test_create_message_reports_missing_gemini_config(monkeypatch, tmp_path):
+    credentials_path = tmp_path / "missing.json"
+
+    monkeypatch.setenv("APP_PORT", "8000")
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "demo-project")
+    monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", str(credentials_path))
+    monkeypatch.setenv("GCP_SPEECH_LOCATION", "us")
+    monkeypatch.setenv("GEMINI_LOCATION", "us-central1")
+    monkeypatch.setenv("GEMINI_MODEL", "gemini-2.5-flash")
+    get_settings.cache_clear()
+
+    client = TestClient(create_app())
+
+    response = client.post(
+        "/api/asr/v2/messages",
+        files={"audio": ("sample.webm", b"fake-audio", "audio/webm")},
+    )
+
+    assert response.status_code == 503
+    payload = response.json()
+    assert payload["detail"]["message"] == "Gemini configuration is incomplete."
+    assert payload["detail"]["missing_env"] == [
+        f"GOOGLE_APPLICATION_CREDENTIALS:{credentials_path}"
+    ]
 
 
 def test_create_transcript_resource_returns_text_and_is_fetchable(monkeypatch, tmp_path):

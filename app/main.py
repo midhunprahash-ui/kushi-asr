@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import mimetypes
 from pathlib import Path
 import threading
 import time
@@ -15,7 +16,8 @@ import uvicorn
 
 from app.callbacks import TranscriptPostError, TranscriptPoster
 from app.config import Settings, get_settings
-from app.models import HealthResponse, TranscriptResponse, TranscriptTextResponse
+from app.gemini import GeminiGenerationError, VertexGeminiMessageGenerator
+from app.models import HealthResponse, MessageResponse, TranscriptResponse, TranscriptTextResponse
 from app.speech import GoogleSpeechRecognizer, SpeechRecognitionError
 from app.session_manager import SessionManager, TranscriptSession
 from app.transcript_store import StoredTranscript, TranscriptStore
@@ -92,6 +94,39 @@ def build_transcript_response(result: StoredTranscript) -> TranscriptResponse:
     )
 
 
+def resolve_upload_mime_type(audio: UploadFile) -> str:
+    if audio.content_type:
+        return audio.content_type
+
+    guessed, _ = mimetypes.guess_type(audio.filename or "")
+    if guessed:
+        return guessed
+
+    return "audio/webm"
+
+
+async def read_uploaded_audio(
+    audio: UploadFile,
+    max_upload_bytes: int,
+    *,
+    too_large_message: str,
+) -> bytes:
+    audio_bytes = await audio.read(max_upload_bytes + 1)
+    if not audio_bytes:
+        raise HTTPException(status_code=400, detail={"message": "Audio file is required."})
+
+    if len(audio_bytes) > max_upload_bytes:
+        raise HTTPException(
+            status_code=413,
+            detail={
+                "message": too_large_message,
+                "max_upload_bytes": max_upload_bytes,
+            },
+        )
+
+    return audio_bytes
+
+
 def create_app() -> FastAPI:
     settings = get_settings()
 
@@ -101,6 +136,7 @@ def create_app() -> FastAPI:
         summary="Push-to-talk transcription via Google Speech-to-Text v2.",
     )
     app.state.speech_recognizer = GoogleSpeechRecognizer(settings)
+    app.state.gemini_message_generator = VertexGeminiMessageGenerator(settings)
     app.state.transcript_poster = TranscriptPoster(
         timeout_seconds=settings.asr_output_post_timeout_seconds,
     )
@@ -109,6 +145,7 @@ def create_app() -> FastAPI:
     app.mount("/static", NoCacheStaticFiles(directory=STATIC_DIR), name="static")
 
     router = APIRouter(prefix=settings.api_prefix)
+    router_v2 = APIRouter(prefix=settings.api_v2_prefix)
 
     async def deliver_transcript(
         text: str,
@@ -234,6 +271,17 @@ def create_app() -> FastAPI:
             },
         )
 
+    @router_v2.get("/player")
+    async def player_v2() -> FileResponse:
+        return FileResponse(
+            STATIC_DIR / "player-v2.html",
+            headers={
+                "Cache-Control": CACHE_CONTROL_NO_STORE,
+                "Pragma": "no-cache",
+                "Expires": "0",
+            },
+        )
+
     async def create_transcript_record(
         audio: UploadFile = File(...),
         language_code: Optional[str] = Form(default=None),
@@ -249,18 +297,11 @@ def create_app() -> FastAPI:
                 },
             )
 
-        audio_bytes = await audio.read(settings.asr_max_upload_bytes + 1)
-        if not audio_bytes:
-            raise HTTPException(status_code=400, detail={"message": "Audio file is required."})
-
-        if len(audio_bytes) > settings.asr_max_upload_bytes:
-            raise HTTPException(
-                status_code=413,
-                detail={
-                    "message": "Audio file is too large for synchronous recognition.",
-                    "max_upload_bytes": settings.asr_max_upload_bytes,
-                },
-            )
+        audio_bytes = await read_uploaded_audio(
+            audio,
+            settings.asr_max_upload_bytes,
+            too_large_message="Audio file is too large for synchronous recognition.",
+        )
 
         requested_language = language_code or settings.asr_language_code
 
@@ -283,6 +324,39 @@ def create_app() -> FastAPI:
         transcript = apply_delivery_status(transcript, delivery_status, delivery_target)
 
         return build_transcript_response(transcript)
+
+    @router_v2.post("/messages", response_model=MessageResponse)
+    async def create_message(audio: UploadFile = File(...)) -> MessageResponse:
+        missing_env = settings.missing_gemini_env()
+        if missing_env:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "message": "Gemini configuration is incomplete.",
+                    "missing_env": missing_env,
+                },
+            )
+
+        audio_bytes = await read_uploaded_audio(
+            audio,
+            settings.asr_max_upload_bytes,
+            too_large_message="Audio file is too large for synchronous message generation.",
+        )
+        mime_type = resolve_upload_mime_type(audio)
+
+        try:
+            payload = await asyncio.to_thread(
+                app.state.gemini_message_generator.generate_message,
+                audio_bytes,
+                mime_type,
+            )
+        except GeminiGenerationError as exc:
+            raise HTTPException(
+                status_code=exc.status_code,
+                detail={"message": exc.message, "detail": exc.detail},
+            ) from exc
+
+        return MessageResponse.model_validate(payload)
 
     @router.post("/transcripts", response_model=TranscriptResponse)
     async def create_transcripts(
@@ -432,6 +506,7 @@ def create_app() -> FastAPI:
         return RedirectResponse(url=f"{settings.api_prefix}/player")
 
     app.include_router(router)
+    app.include_router(router_v2)
     return app
 
 

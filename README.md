@@ -10,8 +10,16 @@ Simple push-to-talk ASR microservice using Google Speech-to-Text v2 Chirp 3, Fas
 - `GET /api/asr/v1/transcripts/{transcript_id}`
 - `WS /api/asr/v1/stream`
 - `POST /api/asr/v1/transcript` (legacy alias)
+- `GET /api/asr/v2/player`
+- `POST /api/asr/v2/messages`
 
 `POST /api/asr/v1/transcripts` accepts one uploaded audio file, stores the result, returns transcript metadata for the built-in player UI, and can optionally POST `{"text":"..."}` to another service. The browser player prefers `WS /api/asr/v1/stream` for lower-latency hold-to-talk streaming and falls back to the upload endpoint if streaming capture is unavailable.
+
+`POST /api/asr/v2/messages` accepts one uploaded audio file, sends it to Gemini `generateContent` on Vertex AI with the server-side `GEMINI_SYSTEM_PROMPT`, and returns only:
+
+```json
+{"message":"..."}
+```
 
 If a callback URL is provided, the service forwards the transcript as:
 
@@ -70,6 +78,26 @@ GET response:
 {"text":"hello world"}
 ```
 
+## Message API
+
+Request:
+
+- Content type: `multipart/form-data`
+- File field: `audio`
+
+Response:
+
+```json
+{"message":"cleaned user message"}
+```
+
+Example:
+
+```bash
+curl -X POST http://localhost:8000/api/asr/v2/messages \
+  -F "audio=@/absolute/path/to/clip.webm"
+```
+
 ## Local Run
 
 1. Create a virtual environment and install dependencies:
@@ -98,12 +126,18 @@ export APP_PORT=8000
 http://localhost:8000/api/asr/v1/player
 ```
 
+Gemini player:
+
+```text
+http://localhost:8000/api/asr/v2/player
+```
+
 ## Docker
 
 Build:
 
 ```bash
-docker build -t kushi-asr .
+docker build -t kushi-asr:v2 .
 ```
 
 Run:
@@ -117,7 +151,7 @@ docker run --rm \
   -e GCP_SPEECH_LOCATION=us \
   -e GCP_SPEECH_RECOGNIZER=_ \
   -v /absolute/path/to/service-account.json:/app/credentials/service-account.json:ro \
-  kushi-asr
+  kushi-asr:v2
 ```
 
 Open the player at:
@@ -140,6 +174,9 @@ Compose expects these in `.env`:
 - `GCP_SPEECH_LOCATION`
 - `GCP_SPEECH_RECOGNIZER`
 - `GOOGLE_APPLICATION_CREDENTIALS_HOST_PATH`
+- `GEMINI_LOCATION`
+- `GEMINI_MODEL`
+- `GEMINI_SYSTEM_PROMPT`
 
 The mounted host credential file is exposed inside the container as `/app/credentials/service-account.json`.
 
@@ -160,6 +197,8 @@ docker compose down
 - Chirp 3 is configured with `ASR_MODEL=chirp_3`.
 - The browser player streams PCM audio to FastAPI over WebSocket while you hold the button, then falls back to upload-on-release when streaming capture is unavailable.
 - FastAPI uses Google Speech-to-Text v2 over the Python gRPC transport. Live hold-to-talk uses bidirectional `StreamingRecognize`; the upload fallback uses unary `Recognize`.
+- The v2 message flow records from the mic, uploads the final clip on button release, and calls Gemini `generateContent` on Vertex AI with the server-side `GEMINI_SYSTEM_PROMPT`.
+- `GEMINI_SYSTEM_PROMPT` is intentionally empty in `.env.example`; set it in `.env` to control how spoken audio is rewritten before the JSON message response is returned.
 - Keep clips short; synchronous recognition is intended for brief local files rather than long recordings.
 - To auto-forward UI transcripts, either set `ASR_OUTPUT_POST_URL` in `.env` or fill the callback URL field in the player UI.
 - If `ASR_OUTPUT_BEARER_TOKEN` is set, outbound callback requests include `Authorization: Bearer <token>`.
