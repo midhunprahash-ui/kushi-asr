@@ -5,11 +5,14 @@ from typing import Any, Dict, List, Optional
 
 from google.api_core.client_options import ClientOptions
 from google.api_core.exceptions import GoogleAPICallError, RetryError
+from google.auth import load_credentials_from_file
 from google.auth.exceptions import DefaultCredentialsError
 from google.cloud import speech_v2
 from google.cloud.speech_v2.types import cloud_speech
 
 from app.config import Settings
+
+GOOGLE_CLOUD_SCOPE = "https://www.googleapis.com/auth/cloud-platform"
 
 
 def duration_to_seconds(duration: Any) -> Optional[float]:
@@ -34,11 +37,23 @@ class GoogleSpeechRecognizer:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
 
+    def _load_credentials(self) -> Any:
+        credentials_path = self.settings.google_application_credentials
+        if not credentials_path:
+            raise DefaultCredentialsError("GOOGLE_APPLICATION_CREDENTIALS is not configured.")
+
+        credentials, _ = load_credentials_from_file(
+            credentials_path,
+            scopes=[GOOGLE_CLOUD_SCOPE],
+        )
+        return credentials
+
     def transcribe(self, audio_content: bytes, language_code: str) -> Dict[str, Any]:
         client: Optional[speech_v2.SpeechClient] = None
 
         try:
             client = speech_v2.SpeechClient(
+                credentials=self._load_credentials(),
                 client_options=ClientOptions(api_endpoint=self.settings.speech_api_endpoint),
             )
             request = cloud_speech.RecognizeRequest(
@@ -80,11 +95,21 @@ class GoogleSpeechRecognizer:
                     }
                 )
 
+            speech_seconds = max(
+                (
+                    segment["end_offset_seconds"]
+                    for segment in segments
+                    if segment["end_offset_seconds"] is not None
+                ),
+                default=None,
+            )
+
             return {
                 "text": " ".join(part for part in transcript_parts if part).strip(),
                 "language_code": detected_language,
                 "model": self.settings.asr_model,
                 "segments": segments,
+                "speech_seconds": speech_seconds,
             }
         except DefaultCredentialsError as exc:
             raise SpeechRecognitionError(

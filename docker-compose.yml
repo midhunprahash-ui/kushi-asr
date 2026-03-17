@@ -5,15 +5,17 @@ services:
       dockerfile: Dockerfile
     image: kushi-asr:latest
     container_name: kushi-asr
+    init: true
+    restart: unless-stopped
     env_file:
       - .env
     environment:
       APP_PORT: ${APP_PORT:-8000}
-      GOOGLE_APPLICATION_CREDENTIALS: /app/credentials/Cospin TTS Config.json
+      GOOGLE_APPLICATION_CREDENTIALS: /app/credentials/service-account.json
     ports:
       - "${APP_PORT:-8000}:${APP_PORT:-8000}"
     volumes:
       - type: bind
-        source: ./Cospin TTS Config.json
-        target: /app/credentials/Cospin TTS Config.json
+        source: "${GOOGLE_APPLICATION_CREDENTIALS_HOST_PATH:-./Cospin TTS Config.json}"
+        target: /app/credentials/service-account.json
         read_only: true

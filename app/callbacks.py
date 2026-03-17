@@ -14,10 +14,19 @@ class TranscriptPoster:
     def __init__(self, timeout_seconds: float = 10.0) -> None:
         self.timeout_seconds = timeout_seconds
 
-    async def post_text(self, url: str, text: str) -> None:
+    async def post_text(
+        self,
+        url: str,
+        text: str,
+        bearer_token: str | None = None,
+    ) -> None:
+        headers = {}
+        if bearer_token:
+            headers["Authorization"] = f"Bearer {bearer_token}"
+
         try:
             async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
-                response = await client.post(url, json={"text": text})
+                response = await client.post(url, json={"text": text}, headers=headers)
                 response.raise_for_status()
         except httpx.HTTPError as exc:
             raise TranscriptPostError(

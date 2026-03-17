@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import List, Literal, Optional
 
 from pydantic import BaseModel
 
@@ -17,4 +17,15 @@ class HealthResponse(BaseModel):
 
 
 class TranscriptResponse(BaseModel):
+    id: str
+    text: str
+    language_code: Optional[str] = None
+    model: Optional[str] = None
+    speech_seconds: Optional[float] = None
+    processing_ms: int
+    delivery_status: Literal["sent", "skipped", "failed"]
+    delivery_target: Optional[str] = None
+
+
+class TranscriptTextResponse(BaseModel):
     text: str

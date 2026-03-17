@@ -26,10 +26,15 @@ class Settings(BaseSettings):
     asr_model: str = Field(default="chirp_3", alias="ASR_MODEL")
     asr_max_upload_bytes: int = Field(default=10_485_760, alias="ASR_MAX_UPLOAD_BYTES")
     asr_output_post_url: Optional[str] = Field(default=None, alias="ASR_OUTPUT_POST_URL")
+    asr_output_bearer_token: Optional[str] = Field(
+        default=None,
+        alias="ASR_OUTPUT_BEARER_TOKEN",
+    )
     asr_output_post_timeout_seconds: float = Field(
         default=10.0,
         alias="ASR_OUTPUT_POST_TIMEOUT_SECONDS",
     )
+    asr_result_ttl_seconds: int = Field(default=900, alias="ASR_RESULT_TTL_SECONDS")
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

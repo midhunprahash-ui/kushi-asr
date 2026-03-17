@@ -1,7 +1,11 @@
 .git
 .gitignore
+.env
+.env.*
+!.env.example
 .pytest_cache
 .venv
+Cospin TTS Config.json
 __pycache__
 *.pyc
 *.pyo

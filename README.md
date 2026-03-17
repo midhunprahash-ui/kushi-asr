@@ -6,11 +6,13 @@ Simple push-to-talk ASR microservice using Google Speech-to-Text v2 Chirp 3, Fas
 
 - `GET /api/asr/v1/health`
 - `GET /api/asr/v1/player`
-- `POST /api/asr/v1/transcript`
+- `POST /api/asr/v1/transcripts`
+- `GET /api/asr/v1/transcripts/{transcript_id}`
+- `POST /api/asr/v1/transcript` (legacy alias)
 
-`POST /api/asr/v1/transcript` accepts one uploaded audio file and returns only text in the response.
+`POST /api/asr/v1/transcripts` accepts one uploaded audio file, stores the result, returns transcript metadata for the built-in player UI, and can optionally POST `{"text":"..."}` to another service.
 
-If a callback URL is provided, the service also forwards the transcript as:
+If a callback URL is provided, the service forwards the transcript as:
 
 ```json
 {"text":"hello world"}
@@ -28,22 +30,43 @@ Request:
 Response:
 
 ```json
-{"text":"hello world"}
+{
+  "id": "6f6d0bc6b8ad42fca2e30efde3d45f19",
+  "text": "hello world",
+  "language_code": "en-US",
+  "model": "chirp_3",
+  "speech_seconds": 1.5,
+  "processing_ms": 412,
+  "delivery_status": "sent",
+  "delivery_target": "https://your-other-service.example/post"
+}
 ```
 
 Example:
 
 ```bash
-curl -X POST http://localhost:8000/api/asr/v1/transcript \
+curl -X POST http://localhost:8000/api/asr/v1/transcripts \
   -F "audio=@/absolute/path/to/clip.webm"
 ```
 
 Callback example:
 
 ```bash
-curl -X POST http://localhost:8000/api/asr/v1/transcript \
+curl -X POST http://localhost:8000/api/asr/v1/transcripts \
   -F "audio=@/absolute/path/to/clip.webm" \
   -F "callback_url=http://your-other-service:9000/input"
+```
+
+Fetch stored transcript by ID:
+
+```bash
+curl http://localhost:8000/api/asr/v1/transcripts/6f6d0bc6b8ad42fca2e30efde3d45f19
+```
+
+GET response:
+
+```json
+{"text":"hello world"}
 ```
 
 ## Local Run
@@ -96,6 +119,12 @@ docker run --rm \
   kushi-asr
 ```
 
+Open the player at:
+
+```text
+http://localhost:8000/api/asr/v1/player
+```
+
 ## Docker Compose
 
 Build and start:
@@ -103,6 +132,15 @@ Build and start:
 ```bash
 docker compose up --build
 ```
+
+Compose expects these in `.env`:
+
+- `GOOGLE_CLOUD_PROJECT`
+- `GCP_SPEECH_LOCATION`
+- `GCP_SPEECH_RECOGNIZER`
+- `GOOGLE_APPLICATION_CREDENTIALS_HOST_PATH`
+
+The mounted host credential file is exposed inside the container as `/app/credentials/service-account.json`.
 
 Run detached:
 
@@ -122,4 +160,6 @@ docker compose down
 - The browser player records a short clip and uploads it in one request.
 - The backend uses synchronous recognition with format auto-detection, which is suited to short push-to-talk audio.
 - Keep clips short; synchronous recognition is intended for brief local files rather than long recordings.
-- To auto-forward UI transcripts, either set `ASR_OUTPUT_POST_URL` in `.env` or open the player with `?callback_url=...`.
+- To auto-forward UI transcripts, either set `ASR_OUTPUT_POST_URL` in `.env` or fill the callback URL field in the player UI.
+- If `ASR_OUTPUT_BEARER_TOKEN` is set, outbound callback requests include `Authorization: Bearer <token>`.
+- Stored transcripts expire after `ASR_RESULT_TTL_SECONDS` and are kept in memory only.

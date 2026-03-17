@@ -8,9 +8,22 @@
   </head>
   <body>
     <main class="app-shell">
-      <p class="eyebrow">Kushi ASR</p>
-      <h1>Hold to talk</h1>
-      <p class="subhead">Press and hold the button, speak, then release.</p>
+      <h1>Push to talk</h1>
+      <p class="subhead">Hold the button, speak, then release.</p>
+
+      <section class="panel">
+        <h2>Delivery</h2>
+        <label class="field-label" for="callbackUrlInput">Callback URL</label>
+        <input
+          id="callbackUrlInput"
+          class="text-input"
+          type="url"
+          placeholder="https://your-postman-endpoint.example/post"
+          inputmode="url"
+          autocomplete="off"
+        />
+        <p class="field-help">When set, each transcript is POSTed as {"text":"..."}.</p>
+      </section>
 
       <button id="talkButton" class="talk-button" type="button">
         Hold to talk
@@ -19,6 +32,59 @@
       <p id="status" class="status idle">Idle</p>
 
       <section class="panel">
+        <h2>Metrics</h2>
+        <dl class="metrics">
+          <div class="metric-row">
+            <dt>Request latency</dt>
+            <dd id="latencyValue">-</dd>
+          </div>
+          <div class="metric-row">
+            <dt>ASR time</dt>
+            <dd id="processingValue">-</dd>
+          </div>
+          <div class="metric-row">
+            <dt>Recording</dt>
+            <dd id="recordingValue">-</dd>
+          </div>
+          <div class="metric-row">
+            <dt>Speech</dt>
+            <dd id="speechValue">-</dd>
+          </div>
+          <div class="metric-row">
+            <dt>Audio size</dt>
+            <dd id="audioSizeValue">-</dd>
+          </div>
+          <div class="metric-row">
+            <dt>Recognizer</dt>
+            <dd id="recognizerValue">-</dd>
+          </div>
+        </dl>
+      </section>
+
+      <section class="panel">
+        <h2>Result</h2>
+        <dl class="metrics">
+          <div class="metric-row">
+            <dt>Transcript ID</dt>
+            <dd id="transcriptIdValue">-</dd>
+          </div>
+          <div class="metric-row">
+            <dt>GET URL</dt>
+            <dd id="resultUrlValue" class="metric-wrap">-</dd>
+          </div>
+          <div class="metric-row">
+            <dt>Delivery</dt>
+            <dd id="deliveryStatusValue">-</dd>
+          </div>
+          <div class="metric-row">
+            <dt>Target</dt>
+            <dd id="deliveryTargetValue" class="metric-wrap">-</dd>
+          </div>
+        </dl>
+      </section>
+
+      <section class="panel">
+        <h2>Transcript</h2>
         <pre id="finalTranscript" class="transcript muted">Transcript will appear here.</pre>
       </section>
     </main>
