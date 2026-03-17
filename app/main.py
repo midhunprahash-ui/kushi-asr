@@ -381,7 +381,8 @@ def create_app() -> FastAPI:
                     break
 
                 if message.get("bytes") is not None:
-                    session.enqueue_audio(message["bytes"])
+                    if session.audio_closed or session.terminated:
+                        continue
                     received_chunks += 1
                     await websocket.send_json(
                         {
@@ -389,6 +390,7 @@ def create_app() -> FastAPI:
                             "received_chunks": received_chunks,
                         }
                     )
+                    session.enqueue_audio(message["bytes"])
                     continue
 
                 control_text = message.get("text")

@@ -34,7 +34,7 @@ Response:
 {
   "id": "6f6d0bc6b8ad42fca2e30efde3d45f19",
   "text": "hello world",
-  "language_code": "en-US",
+  "language_code": "en-IN",
   "model": "chirp_3",
   "speech_seconds": 1.5,
   "processing_ms": 412,

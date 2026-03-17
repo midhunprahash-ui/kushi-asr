@@ -22,7 +22,7 @@ class Settings(BaseSettings):
     gcp_speech_location: str = Field(default="us", alias="GCP_SPEECH_LOCATION")
     gcp_speech_recognizer: str = Field(default="_", alias="GCP_SPEECH_RECOGNIZER")
 
-    asr_language_code: str = Field(default="en-US", alias="ASR_LANGUAGE_CODE")
+    asr_language_code: str = Field(default="en-IN", alias="ASR_LANGUAGE_CODE")
     asr_model: str = Field(default="chirp_3", alias="ASR_MODEL")
     asr_max_upload_bytes: int = Field(default=10_485_760, alias="ASR_MAX_UPLOAD_BYTES")
     asr_session_ttl_seconds: int = Field(default=180, alias="ASR_SESSION_TTL_SECONDS")

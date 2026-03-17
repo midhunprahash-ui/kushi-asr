@@ -42,7 +42,7 @@ def test_google_speech_recognizer_uses_configured_credentials(monkeypatch, tmp_p
     monkeypatch.setattr("app.speech.load_credentials_from_file", fake_load_credentials_from_file)
     monkeypatch.setattr("app.speech.speech_v2.SpeechClient", FakeSpeechClient)
 
-    result = recognizer.transcribe(b"fake-audio", "en-US")
+    result = recognizer.transcribe(b"fake-audio", "en-IN")
 
     assert loaded["path"] == str(credentials_path)
     assert loaded["scopes"] == ["https://www.googleapis.com/auth/cloud-platform"]
@@ -72,7 +72,7 @@ def test_google_speech_recognizer_streaming_uses_grpc_and_sends_config_first(mon
             self.confidence = confidence
 
     class Result:
-        def __init__(self, transcript, *, is_final, seconds, language_code="en-US", confidence=0.98):
+        def __init__(self, transcript, *, is_final, seconds, language_code="en-IN", confidence=0.98):
             self.alternatives = [Alternative(transcript, confidence)]
             self.is_final = is_final
             self.language_code = language_code
@@ -101,7 +101,7 @@ def test_google_speech_recognizer_streaming_uses_grpc_and_sends_config_first(mon
 
     result = recognizer.transcribe_streaming(
         [b"chunk-1", b"chunk-2"],
-        language_code="en-US",
+        language_code="en-IN",
         source_sample_rate_hz=16_000,
         on_partial=partials.append,
         on_final=finals.append,
@@ -123,6 +123,6 @@ def test_google_speech_recognizer_streaming_uses_grpc_and_sends_config_first(mon
     assert partials == ["hello"]
     assert finals == ["hello world"]
     assert result["text"] == "hello world"
-    assert result["language_code"] == "en-US"
+    assert result["language_code"] == "en-IN"
     assert result["model"] == "chirp_3"
     assert result["speech_seconds"] == 1.5

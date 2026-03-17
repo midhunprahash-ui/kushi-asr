@@ -19,6 +19,7 @@ def build_client(monkeypatch, tmp_path: Path) -> TestClient:
     monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "demo-project")
     monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", str(credentials_path))
     monkeypatch.setenv("GCP_SPEECH_LOCATION", "us")
+    monkeypatch.setenv("ASR_LANGUAGE_CODE", "en-IN")
     monkeypatch.setenv("ASR_RESULT_TTL_SECONDS", "900")
     get_settings.cache_clear()
 
@@ -28,7 +29,7 @@ def build_client(monkeypatch, tmp_path: Path) -> TestClient:
 def install_fake_transcribe(app, *, text="hello world", speech_seconds=1.5):
     def fake_transcribe(audio_content, language_code):
         assert audio_content == b"fake-audio"
-        assert language_code == "en-US"
+        assert language_code == "en-IN"
         segments = []
         if speech_seconds is not None:
             segments.append(
@@ -61,7 +62,7 @@ def install_fake_streaming_transcribe(app, *, text="hello world", speech_seconds
         on_partial,
         on_final,
     ):
-        assert language_code == "en-US"
+        assert language_code == "en-IN"
         assert source_sample_rate_hz == 48_000
 
         for index, chunk in enumerate(audio_chunks):
@@ -137,7 +138,7 @@ def test_create_transcript_resource_returns_text_and_is_fetchable(monkeypatch, t
     payload = response.json()
     assert payload["id"]
     assert payload["text"] == "hello world"
-    assert payload["language_code"] == "en-US"
+    assert payload["language_code"] == "en-IN"
     assert payload["model"] == "chirp_3"
     assert payload["speech_seconds"] == 1.5
     assert isinstance(payload["processing_ms"], int)
@@ -195,7 +196,7 @@ def test_create_transcript_posts_text_to_callback_with_bearer(monkeypatch, tmp_p
     assert response.status_code == 200
     payload = response.json()
     assert payload["text"] == "callback transcript"
-    assert payload["language_code"] == "en-US"
+    assert payload["language_code"] == "en-IN"
     assert payload["model"] == "chirp_3"
     assert payload["speech_seconds"] is None
     assert isinstance(payload["processing_ms"], int)
@@ -310,7 +311,7 @@ def test_stream_transcript_returns_completed_and_persists_result(monkeypatch, tm
         assert completed_payload["type"] == "completed"
         assert completed_payload["id"]
         assert completed_payload["text"] == "hello world"
-        assert completed_payload["language_code"] == "en-US"
+        assert completed_payload["language_code"] == "en-IN"
         assert completed_payload["model"] == "chirp_3"
         assert completed_payload["speech_seconds"] == 1.5
         assert isinstance(completed_payload["processing_ms"], int)

@@ -461,7 +461,7 @@ async function beginStreamingRecording() {
   streamingSocket.send(
     JSON.stringify({
       type: "start",
-      language_code: "en-US",
+      language_code: "en-IN",
       callback_url: callbackUrl || null,
       sample_rate_hz: Math.round(audioContext.sampleRate),
     }),
