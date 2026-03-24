@@ -41,8 +41,16 @@ class Settings(BaseSettings):
     asr_result_ttl_seconds: int = Field(default=900, alias="ASR_RESULT_TTL_SECONDS")
 
     gemini_location: str = Field(default="us-central1", alias="GEMINI_LOCATION")
-    gemini_model: str = Field(default="gemini-2.5-flash", alias="GEMINI_MODEL")
+    gemini_model: str = Field(default="gemini-2.5-flash-lite", alias="GEMINI_MODEL")
     gemini_system_prompt: str = Field(default="", alias="GEMINI_SYSTEM_PROMPT")
+    gemini_enable_thinking: bool = Field(default=False, alias="GEMINI_ENABLE_THINKING")
+    ai_moderation_api_key: Optional[str] = Field(default=None, alias="AI_MODERATION_API_KEY")
+    ai_moderation_base_url: Optional[str] = Field(default=None, alias="AI_MODERATION_BASE_URL")
+    ai_moderation_model: Optional[str] = Field(default=None, alias="AI_MODERATION_MODEL")
+    ai_moderation_timeout_seconds: float = Field(
+        default=5.0,
+        alias="AI_MODERATION_TIMEOUT_SECONDS",
+    )
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

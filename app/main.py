@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 import asyncio
 import json
 import mimetypes
@@ -9,15 +10,22 @@ import time
 from typing import Optional
 
 from fastapi import APIRouter, FastAPI, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, RedirectResponse
+from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import AnyHttpUrl, TypeAdapter, ValidationError
 import uvicorn
 
+from ai_moderation_service import AIModerationService
 from app.callbacks import TranscriptPostError, TranscriptPoster
 from app.config import Settings, get_settings
 from app.gemini import GeminiGenerationError, VertexGeminiMessageGenerator
-from app.models import HealthResponse, MessageResponse, TranscriptResponse, TranscriptTextResponse
+from app.models import (
+    HealthResponse,
+    MessageResponse,
+    MessageTextRequest,
+    TranscriptResponse,
+    TranscriptTextResponse,
+)
 from app.speech import GoogleSpeechRecognizer, SpeechRecognitionError
 from app.session_manager import SessionManager, TranscriptSession
 from app.transcript_store import StoredTranscript, TranscriptStore
@@ -105,6 +113,10 @@ def resolve_upload_mime_type(audio: UploadFile) -> str:
     return "audio/webm"
 
 
+def serialize_ndjson_event(event: dict) -> str:
+    return json.dumps(event, ensure_ascii=True) + "\n"
+
+
 async def read_uploaded_audio(
     audio: UploadFile,
     max_upload_bytes: int,
@@ -130,13 +142,38 @@ async def read_uploaded_audio(
 def create_app() -> FastAPI:
     settings = get_settings()
 
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        yield
+
+        moderation_service = app.state.ai_moderation_service
+        if moderation_service is not None:
+            await moderation_service.close()
+
+        gemini_message_generator = app.state.gemini_message_generator
+        if gemini_message_generator is not None:
+            gemini_message_generator.close()
+
     app = FastAPI(
         title="Kushi ASR",
         version="0.1.0",
         summary="Push-to-talk transcription via Google Speech-to-Text v2.",
+        lifespan=lifespan,
     )
     app.state.speech_recognizer = GoogleSpeechRecognizer(settings)
     app.state.gemini_message_generator = VertexGeminiMessageGenerator(settings)
+    app.state.ai_moderation_service = None
+    if (
+        settings.ai_moderation_api_key
+        and settings.ai_moderation_base_url
+        and settings.ai_moderation_model
+    ):
+        app.state.ai_moderation_service = AIModerationService(
+            api_key=settings.ai_moderation_api_key,
+            base_url=settings.ai_moderation_base_url,
+            model=settings.ai_moderation_model,
+            timeout=settings.ai_moderation_timeout_seconds,
+        )
     app.state.transcript_poster = TranscriptPoster(
         timeout_seconds=settings.asr_output_post_timeout_seconds,
     )
@@ -193,6 +230,21 @@ def create_app() -> FastAPI:
             if chunk is None:
                 break
             yield chunk
+
+    async def resolve_v2_system_instruction(user_text: str) -> Optional[str]:
+        base_instruction = (settings.gemini_system_prompt or "").strip()
+        moderation_service = app.state.ai_moderation_service
+        if moderation_service is None:
+            return base_instruction or None
+
+        category = await moderation_service.classify(user_text)
+        responsible_prompt = moderation_service.get_responsible_prompt(category)
+
+        instructions = [prompt for prompt in [base_instruction, responsible_prompt] if prompt]
+        if not instructions:
+            return None
+
+        return "\n\n".join(instructions)
 
     def run_streaming_session(session: TranscriptSession) -> None:
         started_at = time.perf_counter()
@@ -259,6 +311,10 @@ def create_app() -> FastAPI:
             model=settings.asr_model,
             language_code=settings.asr_language_code,
         )
+
+    @router_v2.get("/health", response_model=HealthResponse)
+    async def health_v2() -> HealthResponse:
+        return await health()
 
     @router.get("/player")
     async def player() -> FileResponse:
@@ -358,6 +414,116 @@ def create_app() -> FastAPI:
 
         return MessageResponse.model_validate(payload)
 
+    @router_v2.post("/messages/stream")
+    async def create_message_stream(audio: UploadFile = File(...)) -> StreamingResponse:
+        missing_env = settings.missing_gemini_env()
+        if missing_env:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "message": "Gemini configuration is incomplete.",
+                    "missing_env": missing_env,
+                },
+            )
+
+        audio_bytes = await read_uploaded_audio(
+            audio,
+            settings.asr_max_upload_bytes,
+            too_large_message="Audio file is too large for streaming message generation.",
+        )
+        mime_type = resolve_upload_mime_type(audio)
+
+        def iter_events():
+            partial_text = ""
+
+            try:
+                for chunk in app.state.gemini_message_generator.generate_message_stream(
+                    audio_bytes,
+                    mime_type,
+                ):
+                    partial_text += chunk
+                    yield serialize_ndjson_event({"type": "partial", "text": partial_text})
+
+                message = partial_text.strip()
+                if not message:
+                    raise GeminiGenerationError(
+                        status_code=502,
+                        message="Gemini returned an empty response.",
+                        detail="The streamed response finished without a final message.",
+                    )
+
+                yield serialize_ndjson_event({"type": "completed", "message": message})
+            except GeminiGenerationError as exc:
+                yield serialize_ndjson_event(
+                    {
+                        "type": "error",
+                        "message": exc.message,
+                        "detail": exc.detail,
+                    }
+                )
+
+        return StreamingResponse(
+            iter_events(),
+            media_type="application/x-ndjson",
+            headers={"Cache-Control": CACHE_CONTROL_NO_STORE},
+        )
+
+    @router_v2.post("/messages/text/stream")
+    async def create_text_message_stream(payload: MessageTextRequest) -> StreamingResponse:
+        missing_env = settings.missing_gemini_env()
+        if missing_env:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "message": "Gemini configuration is incomplete.",
+                    "missing_env": missing_env,
+                },
+            )
+
+        user_text = payload.text.strip()
+        if not user_text:
+            raise HTTPException(
+                status_code=400,
+                detail={"message": "Text input is required."},
+            )
+
+        system_instruction_override = await resolve_v2_system_instruction(user_text)
+
+        def iter_events():
+            partial_text = ""
+
+            try:
+                for chunk in app.state.gemini_message_generator.generate_message_stream_from_text(
+                    user_text,
+                    system_instruction_override=system_instruction_override,
+                ):
+                    partial_text += chunk
+                    yield serialize_ndjson_event({"type": "partial", "text": partial_text})
+
+                message = partial_text.strip()
+                if not message:
+                    raise GeminiGenerationError(
+                        status_code=502,
+                        message="Gemini returned an empty response.",
+                        detail="The streamed response finished without a final message.",
+                    )
+
+                yield serialize_ndjson_event({"type": "completed", "message": message})
+            except GeminiGenerationError as exc:
+                yield serialize_ndjson_event(
+                    {
+                        "type": "error",
+                        "message": exc.message,
+                        "detail": exc.detail,
+                    }
+                )
+
+        return StreamingResponse(
+            iter_events(),
+            media_type="application/x-ndjson",
+            headers={"Cache-Control": CACHE_CONTROL_NO_STORE},
+        )
+
     @router.post("/transcripts", response_model=TranscriptResponse)
     async def create_transcripts(
         audio: UploadFile = File(...),
@@ -385,8 +551,7 @@ def create_app() -> FastAPI:
 
         return TranscriptTextResponse(text=transcript.text)
 
-    @router.websocket("/stream")
-    async def stream_transcript(websocket: WebSocket) -> None:
+    async def handle_stream_transcript(websocket: WebSocket) -> None:
         await websocket.accept()
         session: Optional[TranscriptSession] = None
         received_chunks = 0
@@ -501,9 +666,17 @@ def create_app() -> FastAPI:
                 session.terminate()
                 app.state.session_manager.remove_session(session.session_id)
 
+    @router.websocket("/stream")
+    async def stream_transcript(websocket: WebSocket) -> None:
+        await handle_stream_transcript(websocket)
+
+    @router_v2.websocket("/stream")
+    async def stream_transcript_v2(websocket: WebSocket) -> None:
+        await handle_stream_transcript(websocket)
+
     @app.get("/", include_in_schema=False)
     async def root() -> RedirectResponse:
-        return RedirectResponse(url=f"{settings.api_prefix}/player")
+        return RedirectResponse(url=f"{settings.api_v2_prefix}/player")
 
     app.include_router(router)
     app.include_router(router_v2)

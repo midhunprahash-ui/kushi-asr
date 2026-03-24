@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 from datetime import timedelta
+import json
 from pathlib import Path
 
 from fastapi.testclient import TestClient
 
+from ai_moderation_service import MessageCategory
 from app.callbacks import TranscriptPostError
 from app.config import get_settings
+from app.gemini import GeminiGenerationError
 from app.main import create_app
 from app.speech import duration_to_seconds
 
@@ -22,8 +25,9 @@ def build_client(monkeypatch, tmp_path: Path) -> TestClient:
     monkeypatch.setenv("ASR_LANGUAGE_CODE", "en-IN")
     monkeypatch.setenv("ASR_RESULT_TTL_SECONDS", "900")
     monkeypatch.setenv("GEMINI_LOCATION", "us-central1")
-    monkeypatch.setenv("GEMINI_MODEL", "gemini-2.5-flash")
+    monkeypatch.setenv("GEMINI_MODEL", "gemini-2.5-flash-lite")
     monkeypatch.setenv("GEMINI_SYSTEM_PROMPT", "")
+    monkeypatch.setenv("GEMINI_ENABLE_THINKING", "false")
     get_settings.cache_clear()
 
     return TestClient(create_app())
@@ -102,10 +106,63 @@ def install_fake_generate_message(app, *, message="cleaned user request"):
     app.state.gemini_message_generator.generate_message = fake_generate_message
 
 
+def install_fake_generate_message_stream(app, *, chunks=("cleaned ", "user request")):
+    def fake_generate_message_stream(audio_content, mime_type):
+        assert audio_content == b"fake-audio"
+        assert mime_type == "audio/webm"
+        yield from chunks
+
+    app.state.gemini_message_generator.generate_message_stream = fake_generate_message_stream
+
+
+def install_fake_generate_message_stream_from_text(app, *, chunks=("cleaned ", "user request")):
+    def fake_generate_message_stream_from_text(text, *, system_instruction_override=None):
+        assert text == "what is photosynthesis"
+        yield from chunks
+
+    app.state.gemini_message_generator.generate_message_stream_from_text = (
+        fake_generate_message_stream_from_text
+    )
+
+
+def install_fake_moderation_service(
+    app,
+    *,
+    category=MessageCategory.SAFE,
+    responsible_prompt=None,
+):
+    observed = {}
+
+    class FakeModerationService:
+        async def classify(self, user_input):
+            observed["user_input"] = user_input
+            return category
+
+        def get_responsible_prompt(self, selected_category):
+            observed["category"] = selected_category
+            return responsible_prompt
+
+    app.state.ai_moderation_service = FakeModerationService()
+    return observed
+
+
 def test_health_reports_ready_state(monkeypatch, tmp_path):
     client = build_client(monkeypatch, tmp_path)
 
     response = client.get("/api/asr/v1/health")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "ok"
+    assert payload["speech_ready"] is True
+    assert payload["port"] == 8000
+    assert payload["model"] == "chirp_3"
+
+
+def test_v2_health_reports_ready_state(monkeypatch, tmp_path):
+    client = build_client(monkeypatch, tmp_path)
+
+    response = client.get("/api/asr/v2/health")
 
     assert response.status_code == 200
     payload = response.json()
@@ -134,6 +191,7 @@ def test_v2_player_page_is_served(monkeypatch, tmp_path):
     assert response.status_code == 200
     assert "Push to message" in response.text
     assert "GEMINI_SYSTEM_PROMPT" in response.text
+    assert "transcribes live while you speak" in response.text
     assert response.headers["cache-control"] == "no-store, no-cache, must-revalidate"
 
 
@@ -170,6 +228,132 @@ def test_create_message_returns_json_message(monkeypatch, tmp_path):
     assert response.json() == {"message": "rewrite this into a crisp request"}
 
 
+def test_create_message_stream_returns_ndjson_events(monkeypatch, tmp_path):
+    client = build_client(monkeypatch, tmp_path)
+    app = client.app
+
+    install_fake_generate_message_stream(
+        app,
+        chunks=("rewrite this ", "into a crisp request"),
+    )
+
+    response = client.post(
+        "/api/asr/v2/messages/stream",
+        files={"audio": ("sample.webm", b"fake-audio", "audio/webm")},
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("application/x-ndjson")
+
+    events = [json.loads(line) for line in response.text.splitlines() if line.strip()]
+    assert events == [
+        {"type": "partial", "text": "rewrite this "},
+        {"type": "partial", "text": "rewrite this into a crisp request"},
+        {"type": "completed", "message": "rewrite this into a crisp request"},
+    ]
+
+
+def test_create_message_stream_reports_generation_errors(monkeypatch, tmp_path):
+    client = build_client(monkeypatch, tmp_path)
+    app = client.app
+
+    def fake_generate_message_stream(audio_content, mime_type):
+        raise GeminiGenerationError(
+            status_code=502,
+            message="Gemini generateContent request failed.",
+            detail="upstream failed",
+        )
+        yield
+
+    app.state.gemini_message_generator.generate_message_stream = fake_generate_message_stream
+
+    response = client.post(
+        "/api/asr/v2/messages/stream",
+        files={"audio": ("sample.webm", b"fake-audio", "audio/webm")},
+    )
+
+    assert response.status_code == 200
+    events = [json.loads(line) for line in response.text.splitlines() if line.strip()]
+    assert events == [
+        {
+            "type": "error",
+            "message": "Gemini generateContent request failed.",
+            "detail": "upstream failed",
+        }
+    ]
+
+
+def test_create_text_message_stream_returns_ndjson_events(monkeypatch, tmp_path):
+    client = build_client(monkeypatch, tmp_path)
+    app = client.app
+
+    install_fake_generate_message_stream_from_text(
+        app,
+        chunks=("Photosynthesis ", "is how plants make food."),
+    )
+
+    response = client.post(
+        "/api/asr/v2/messages/text/stream",
+        json={"text": "what is photosynthesis"},
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("application/x-ndjson")
+
+    events = [json.loads(line) for line in response.text.splitlines() if line.strip()]
+    assert events == [
+        {"type": "partial", "text": "Photosynthesis "},
+        {"type": "partial", "text": "Photosynthesis is how plants make food."},
+        {"type": "completed", "message": "Photosynthesis is how plants make food."},
+    ]
+
+
+def test_create_text_message_stream_uses_responsible_prompt(monkeypatch, tmp_path):
+    monkeypatch.setenv("GEMINI_SYSTEM_PROMPT", "Base assistant prompt.")
+    client = build_client(monkeypatch, tmp_path)
+    app = client.app
+    moderation_observed = install_fake_moderation_service(
+        app,
+        category=MessageCategory.SELF_HARM,
+        responsible_prompt="Responsible child-safety prompt.",
+    )
+    captured = {}
+
+    def fake_generate_message_stream_from_text(text, *, system_instruction_override=None):
+        captured["text"] = text
+        captured["system_instruction_override"] = system_instruction_override
+        yield "Please talk to a trusted adult right away."
+
+    app.state.gemini_message_generator.generate_message_stream_from_text = (
+        fake_generate_message_stream_from_text
+    )
+
+    response = client.post(
+        "/api/asr/v2/messages/text/stream",
+        json={"text": "what is photosynthesis"},
+    )
+
+    assert response.status_code == 200
+    assert moderation_observed == {
+        "user_input": "what is photosynthesis",
+        "category": MessageCategory.SELF_HARM,
+    }
+    assert captured["text"] == "what is photosynthesis"
+    assert captured["system_instruction_override"] == "Responsible child-safety prompt."
+
+
+def test_create_text_message_stream_rejects_empty_text(monkeypatch, tmp_path):
+    client = build_client(monkeypatch, tmp_path)
+
+    response = client.post(
+        "/api/asr/v2/messages/text/stream",
+        json={"text": "   "},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"]["message"] == "Text input is required."
+
+
 def test_create_message_rejects_empty_upload(monkeypatch, tmp_path):
     client = build_client(monkeypatch, tmp_path)
 
@@ -190,7 +374,7 @@ def test_create_message_reports_missing_gemini_config(monkeypatch, tmp_path):
     monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", str(credentials_path))
     monkeypatch.setenv("GCP_SPEECH_LOCATION", "us")
     monkeypatch.setenv("GEMINI_LOCATION", "us-central1")
-    monkeypatch.setenv("GEMINI_MODEL", "gemini-2.5-flash")
+    monkeypatch.setenv("GEMINI_MODEL", "gemini-2.5-flash-lite")
     get_settings.cache_clear()
 
     client = TestClient(create_app())
@@ -429,6 +613,32 @@ def test_stream_transcript_rejects_invalid_callback_url(monkeypatch, tmp_path):
         "type": "error",
         "message": "callback_url must be a valid http or https URL.",
     }
+
+
+def test_v2_stream_transcript_alias_returns_completed(monkeypatch, tmp_path):
+    client = build_client(monkeypatch, tmp_path)
+    app = client.app
+    install_fake_streaming_transcribe(app, text="hello world", speech_seconds=1.5)
+
+    with client.websocket_connect("/api/asr/v2/stream") as websocket:
+        websocket.send_json(
+            {
+                "type": "start",
+                "sample_rate_hz": 48_000,
+            }
+        )
+        session_payload = websocket.receive_json()
+        assert session_payload["type"] == "session"
+        websocket.send_bytes(b"chunk-one")
+        websocket.receive_json()
+        websocket.receive_json()
+        websocket.send_json({"type": "stop"})
+        final_payload = websocket.receive_json()
+        completed_payload = websocket.receive_json()
+
+    assert final_payload == {"type": "final", "text": "hello world"}
+    assert completed_payload["type"] == "completed"
+    assert completed_payload["text"] == "hello world"
 
 
 def test_duration_to_seconds_accepts_timedelta():
