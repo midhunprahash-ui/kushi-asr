@@ -12,19 +12,159 @@ Single-version `v2` push-to-talk voice assistant built with FastAPI, Google Spee
 - `POST /api/asr/v2/messages/stream`
 - `POST /api/asr/v2/messages/text/stream`
 
-`GET /` redirects to the `v2` player.
+## API Reference
 
-`POST /api/asr/v2/messages` accepts one uploaded audio file, sends it to Gemini `generateContent` on Vertex AI with the server-side `GEMINI_SYSTEM_PROMPT`, and returns only:
+### `GET /`
 
+Use:
+- Opens the app entrypoint in the browser.
+- Redirects to the `v2` player page.
+
+Typical use:
+- Open `http://localhost:8000/` instead of remembering the full player path.
+
+### `GET /api/asr/v2/health`
+
+Use:
+- Health and readiness check for the current app.
+- Confirms the service is up and reports the active recognizer/model configuration.
+
+Typical use:
+- Docker health checks
+- deployment checks
+- quick debugging to confirm credentials/config are loaded
+
+### `GET /api/asr/v2/player`
+
+Use:
+- Serves the built-in push-to-talk browser UI.
+- This is the main UI for speaking, transcribing, and getting the final generated response.
+
+Typical use:
+- Open in Chrome/Edge and hold the talk button to speak.
+
+### `WS /api/asr/v2/stream`
+
+Use:
+- Live speech-to-text websocket endpoint.
+- The browser sends microphone audio chunks here while the user is still speaking.
+- The server sends transcript events back while the utterance is in progress.
+
+Typical use:
+- Low-latency transcript capture for the built-in `v2` UI.
+- Better than waiting for a full audio upload before transcription starts.
+
+Event flow:
+
+Client sends:
+```json
+{"type":"start","sample_rate_hz":48000}
+```
+
+Then binary audio chunks, then:
+```json
+{"type":"stop"}
+```
+
+Server sends events like:
+```json
+{"type":"session","session_id":"..."}
+{"type":"chunk","received_chunks":1}
+{"type":"partial","text":"what is"}
+{"type":"final","text":"what is photosynthesis"}
+{"type":"completed","text":"what is photosynthesis","id":"..."}
+```
+
+Purpose in the current app:
+- This is the first stage of the low-latency `v2` flow.
+- It captures the user’s spoken words before Gemini generation starts.
+
+### `POST /api/asr/v2/messages`
+
+Use:
+- One-shot audio-to-answer API.
+- Upload a recorded audio file directly to Gemini `generateContent`.
+
+Request:
+- Content type: `multipart/form-data`
+- File field: `audio`
+
+Response:
 ```json
 {"message":"..."}
 ```
 
-`POST /api/asr/v2/messages/stream` accepts the same upload but streams Gemini text back as newline-delimited JSON events while the answer is being generated. The built-in v2 player uses this route so you see partial output before the final JSON lands.
+Typical use:
+- Server-to-server or Postman testing
+- simple one-request audio input without incremental output
 
-`POST /api/asr/v2/messages/text/stream` accepts a final transcript string and streams Gemini text back as newline-delimited JSON events. The built-in v2 player uses `WS /api/asr/v2/stream` while you hold the button, then calls this text route on release for lower answer latency.
+### `POST /api/asr/v2/messages/stream`
 
-When the optional AI moderation service is configured, the v2 text route classifies the final transcript first and appends the matching responsible system prompt before Gemini generates the answer.
+Use:
+- Streaming version of the direct audio-to-Gemini route.
+- Upload one audio file, then receive the generated text incrementally as it is produced.
+
+Request:
+- Content type: `multipart/form-data`
+- File field: `audio`
+
+Response format:
+- `application/x-ndjson`
+- newline-delimited JSON events
+
+Events:
+```json
+{"type":"partial","text":"draft answer"}
+{"type":"partial","text":"draft answer with more text"}
+{"type":"completed","message":"draft answer with more text"}
+```
+
+Typical use:
+- progressive output for uploaded audio
+- fallback path when transcript-first flow is not used
+
+### `POST /api/asr/v2/messages/text/stream`
+
+Use:
+- Transcript-to-answer streaming route.
+- Accepts plain text and streams Gemini output back incrementally.
+- This is the main low-latency generation path used by the current `v2` UI after speech has already been transcribed.
+
+Request:
+```json
+{"text":"what is photosynthesis"}
+```
+
+Response format:
+- `application/x-ndjson`
+- newline-delimited JSON events
+
+Events:
+```json
+{"type":"partial","text":"Photosynthesis "}
+{"type":"partial","text":"Photosynthesis is how plants make food."}
+{"type":"completed","message":"Photosynthesis is how plants make food."}
+```
+
+Typical use:
+- lowest-latency answer generation in the current app
+- external integrations that already have text input
+
+Responsible AI behavior:
+- When the moderation client is configured, this route classifies the final user transcript first.
+- If the transcript is flagged, the matching responsible prompt from [ai_moderation_service.py](/Users/midhun/Developer/kushi-asr/ai_moderation_service.py) is appended to the system instruction before Gemini generates the answer.
+
+## Current v2 Flow
+
+The built-in `v2` UI works in two stages:
+
+1. While the user is speaking, the browser streams PCM audio to `WS /api/asr/v2/stream`.
+2. When the user releases the button, the final transcript is sent to `POST /api/asr/v2/messages/text/stream`.
+3. Gemini generates the answer text and the UI renders it as:
+
+```json
+{"message":"..."}
+```
 
 ## Message API
 
